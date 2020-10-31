@@ -26,14 +26,13 @@
  * @brief Writable packet constructor
  *
  * @param	size	Size of the packet. (in bytes)
- * @todo Make sure that we check bounds?
  */
 Packet::Packet(size_t size)
 {
 	// Make a new packet with size bytes allocated
 	readOnly = false;
 	statusOK = true;
-	buff = new char[size]; //(char *)malloc(sizeof(char) * size);
+	buff = new char[size];
 	ptr = buff;
 
 	this->size = size;
@@ -49,7 +48,7 @@ Packet::Packet(size_t size)
 Packet::Packet( char * aBuff, size_t length)
 {
 	// Prepare to parse a received packet
-	buff = new char[length]; //(char *)malloc(len);
+	buff = new char[length];
 	memcpy(buff, aBuff, length);
 	ptr = buff;
 	readOnly = true;
@@ -64,23 +63,23 @@ Packet::~Packet()
 }
 
 
-void Packet::writeBytes(const void *data, size_t length)
+bool Packet::writeBytes(const void *data, size_t length)
 {
 	if(readOnly)
 	{
 		printf("Attempted to write to a readonly packet!\n");
-		return;
+		return false;
 	}
 
 	if(!length)
-		return;
+		return true;
 	
 	// verify we have enough buffer space to write to
-	if(!(getLength() + length) > size)
+	if((getLength() + length) > size)
 	{
 		// not enough bytes remain, abort
 		statusOK = false;
-		return;
+		return false;
 	}
 
 	// write out data
@@ -90,25 +89,26 @@ void Packet::writeBytes(const void *data, size_t length)
 	ptr += length;
 
 	// done
+	return true;
 }
 
-void Packet::readBytes(void *data, size_t length)
+bool Packet::readBytes(void *data, size_t length)
 {
 	if(!readOnly)
 	{
 		printf("Attempted to read from a writeonly packet!\n");
-		return;
+		return false;
 	}
 
 	if(!length)
-		return;
+		return true;
 	
 	// verify we have enough data to read
 	if((getLength() + length) > size)
 	{
 		// not enough bytes remain, abort
 		statusOK = false;
-		return;
+		return false;
 	}
 
 	// read in data
@@ -118,6 +118,7 @@ void Packet::readBytes(void *data, size_t length)
 	ptr += length;
 
 	// done
+	return true;
 }
 
 
@@ -165,6 +166,7 @@ char* Packet::readCString()
 
 	// allocate a new string plus a NULL char
 	str = new char[length +1];
+	str[0] = 0;
 	str[length] = 0;
 
 	// read string into our new string
@@ -188,66 +190,47 @@ void Packet::writeCString(const char *str, size_t length)
 	writeBytes(str, length);	// string characters, excluding NULL	
 }
 
-
-/*
-void Packet::readNullString(char *dat)
-{
-	char f; int i=0;
-	while((f=readU8()))
-		dat[i++] = f;
-	dat[i++] = 0;
-}
-
-void Packet::writeNullString(char *dat)
-{
-//	char * ptr2 = dat;
-	char c;
-
-	while(c = *(dat++))
-		writeU8(c);
-	writeU8(0);
-}
-*/
-
-/**
- * @brief return length of written packet.
- */
-size_t Packet::getLength()
-{
-	return ptr - buff;
-}
-
 /**
  * @brief Write standard protocol header to the packet.
  */
-void Packet::writeHeader(U8 type, U8 flags, U16 session, U16 key)
+void Packet::writeHeader(U8 type, U8 flags, U32 session, U16 key)
 {
 	writeU8( type);		// packet type
 	writeU8( flags);	// flags
-	writeU16(session);	// session
-	writeU16(key);		// key
-}
 
-void Packet::writeHeader(tPacketHeader &header)
-{
-	writeHeader(header.type, header.flags, header.session, header.key);
+	if (flags & Session::AuthenticatedSession)
+	{
+		//printf("WROTE AUTHENTICATED HEADER %u\n", flags);
+		writeU32(session);
+	}
+	else
+	{
+		//printf("WROTE AUTHENTICATED HEADER %u\n", flags);
+		writeU16(session);	// session
+		writeU16(key);		// key
+	}
 }
 
 /**
  * @brief Read standard protocol header to the packet.
  */
-void Packet::readHeader(U8 &type, U8 &flags, U16 &session, U16 &key)
+void Packet::readHeader(U8 &type, U8 &flags, U32 &session, U16 &key)
 {
 	type	= readU8();		// packet type
 	flags	= readU8();		// flags
-	session	= readU16();	// session
-	key		= readU16();	// key
+
+	if (flags & Session::AuthenticatedSession)	// session
+	{
+		session = readU32();
+		key = 0;
+	}
+	else
+	{
+		session = readU16();
+		key	  = readU16();	// key
+	}
 }
 
-void Packet::readHeader(tPacketHeader &header)
-{
-	readHeader(header.type, header.flags, header.session, header.key);
-}
 
 /**
  * @brief Return pointer to copy of packet's internal buffer.
@@ -267,11 +250,4 @@ char * Packet::getBufferCopy()
 	memcpy(buff_copy, this->buff, getLength());
 	return buff_copy;
 }
-
-char* Packet::getBufferPtr()
-{
-	// return actual buffer pointer, saves some heap thrashing
-	return buff;
-}
-
 

@@ -14,8 +14,10 @@ $name "PBMS"
 $region "Earth"
 
 # IPv4 address that the Daemon listens and sends on. Default: "0.0.0.0" for All
-# NOTE: IPv6 currently not supported.
 $address "0.0.0.0"
+
+# IPv6 address that the Daemon listens and sends on. Default: "0.0.0.0.0.0" for All
+# $address "0.0.0.0.0.0"
 
 # Port number that the Daemon listens and sends on. Default: 28002
 $port 28002

@@ -196,17 +196,37 @@ public:
 class ServerFilter
 {
 public:
+
+
+	enum // Filter flags
+	{
+		Dedicated = 0x1,
+		NotPassworded = 0x2,
+		Linux = 0x2,
+
+		CurrentVersion = 0x80
+	};
+
+	enum // Region mask address flags
+	{
+		// The following are fixed by the master server regardless of what the server sends. If neither are set, the server will force IsIPV4 to be true, and IsIPV6 also if this is a new-style response.
+		RegionIsIPV4Address = 0x40000000, // bit 31
+		RegionIsIPV6Address = 0x80000000,  // bit 32
+
+		RegionAddressMask = RegionIsIPV4Address | RegionIsIPV6Address
+	};
+
 	char	*gameType;			// game type string
 	char	*missionType;		// mission type string
-	U8		minPlayers;			// minimum player count
-	U8		maxPlayers;			// maximum player count
+	U32		*buddyList;			// pointer to buddy array
 	U32		regions;			// regions bitmask
 	U32		version;			// minimum version
+	U16		minCPUSpeed;		// minimum processor speed
+	U8		minPlayers;			// minimum player count
+	U8		maxPlayers;			// maximum player count
 	U8		filterFlags;		// info flag filter
 	U8		maxBots;			// maximum bots
-	U16		minCPUSpeed;		// minimum processor speed
 	U8		buddyCount;			// number of buddies in array
-	U32		*buddyList;			// pointer to buddy array
 
 	ServerFilter()
 	{
@@ -215,40 +235,12 @@ public:
 		buddyList		= NULL;
 	}
 
-	~ServerFilter() {
+	~ServerFilter()
+	{
 		if(missionType)	delete[] missionType;
 		if(gameType)	delete[] gameType;
 		if(buddyList)	delete[] buddyList;
 	}
-};
-
-/**
- * @brief ServerResults store results from queries.
- *
- * They are also stored by the Session tracker so we can resend.
- */
-class ServerResults
-{
-public:
-	ServerResults() {
-		next = NULL;
-	}
-
-	void dealloc() {
-		// We don't want to recurse in the destructor, so we iterate
-		ServerResults * cur = this->next, *tmp;
-
-		while(cur)
-		{
-			tmp = cur->next;
-			delete cur;
-			cur = tmp;
-		}
-	}
-
-	int count;					// Number of items in this chunk
-	ServerAddress server[LIST_PACKET_MAX_SERVERS];
-	ServerResults * next;		// And a pointer to the next set of data.
 };
 
 /**
@@ -260,25 +252,26 @@ class ServerInfo
 {
 public:
 	ServerAddress	addr;
-	U16				session;
+	U32				session;
 	U16				key;
 
 	char	*gameType;
 	char	*missionType;
-	U8		maxPlayers;
+	U32		*playerList;	// players GUID array, may be NULL!
 	U32		regions;
 	U32		version;
-	U8		infoFlags;
-	U8		numBots;
 	U16		CPUSpeed;
 	U8		playerCount;
-	U32		*playerList;	// players GUID array
-
+	U8		maxPlayers;
+	U8		infoFlags;
+	U8		numBots;
 
 	// Bookkeeping information
-	int  last_heart;	// Last time we got a heart beat
-	int  last_info;	// Last time we got info from them
+	time_t  tsLastHeart;	// Last time we got a heart beat
+	time_t  tsLastInfo;	// Last time we got info from them
 	bool m_DestroyPlayers;
+	bool testServer;
+	bool ownsStrings;
 
 	ServerInfo(bool destroyPlayers = true)
 	{
@@ -294,16 +287,21 @@ public:
 		CPUSpeed	= 0;
 		playerCount	= 0;
 		
-		last_heart	= 0;
-		last_info	= 0;
+		tsLastHeart	= 0;
+		tsLastInfo	= 0;
 		
 		m_DestroyPlayers = destroyPlayers;
+		testServer = false;
+		ownsStrings = true;
 	}
 
 	~ServerInfo()
 	{
-		if(missionType)	delete[] missionType;
-		if(gameType)	delete[] gameType;
+		if (ownsStrings)
+		{
+			if(missionType)	delete[] missionType;
+			if(gameType)	delete[] gameType;
+		}
 
 		// only destroy players GUID array if requested to
 		if(m_DestroyPlayers && playerList)
@@ -316,36 +314,17 @@ public:
 	}
 };
 
-
-class Server {
-	public:
-	Server() {
-		vInfo = new ServerInfo();
-		vAddress = new ServerAddress();
-	};
-	~Server() {
-		delete vAddress;
-		delete vInfo;
-	};
-	ServerAddress *vAddress;
-	ServerInfo *vInfo;
-	enum flags {
-		running_linux = 0x1,
-		dedicated = 0x2,
-		passworded = 0x4,
-	};
-};
-
-
 class ServerStore
 {
 public:
 	UniqueStringList	m_GameTypes;
 	UniqueStringList	m_MissionTypes;
+
+	virtual ~ServerStore() {;}
 	
 	// Work functions
 	virtual void DoProcessing(int count = 5) = 0;
-	virtual void HeartbeatServer(ServerAddress *addr, U16 *session, U16 *key) = 0;
+	virtual void HeartbeatServer(ServerAddress *addr, U32 *session, U16 *key) = 0;
 	virtual void UpdateServer(ServerAddress *addr, ServerInfo *info) = 0;
 
 	virtual void QueryServers(Session *session, ServerFilter *filter) = 0;

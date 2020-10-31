@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include "masterd.h"
 #include "TorqueIO.h"
 #include "SessionHandler.h"
+#include "netSocket.h"
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -35,7 +36,7 @@ using namespace std;
 #if !defined(WIN32) && defined(__GNUC__)
 	#include <signal.h>
 	#include <sys/types.h>
-        #include <unistd.h>
+	#include <unistd.h>
 	#define stricmp strcasecmp
 	#define strnicmp strncasecmp
 #endif
@@ -116,9 +117,22 @@ void sigproc(int sig)
 // utility functions
 //-----------------------------------------------------------------------------
 
+bool shouldDebugPrintf(const int level)
+{
+	if(gm_pConfig)
+	{
+		// yes, now filter for verbosity level
+		if(level > (int)gm_pConfig->verbosity)
+			return false; // message level too high, abort
+	}
+
+	return true;
+}
+
 void debugPrintf(const int level, const char *format, ...)
 {
 	va_list args;
+	static bool skipTS = false;
 
 	
 	// is global configuration pointer set?
@@ -127,12 +141,80 @@ void debugPrintf(const int level, const char *format, ...)
 		// yes, now filter for verbosity level
 		if(level > (int)gm_pConfig->verbosity)
 			return; // message level too high, abort
+
+		if(gm_pConfig->timestamp && !skipTS)
+		{
+			struct tm * ts;
+			time_t now;
+			size_t len;
+			
+			time(&now);
+			ts = localtime(&now);
+			
+			// [YYYY-MM-DD hh:mm:ss]
+			printf("[%04d-%02d-%02d %02d:%02d:%02d] ",
+				ts->tm_year + 1900, ts->tm_mon +1, ts->tm_mday,
+				ts->tm_hour, ts->tm_min, ts->tm_sec);
+			
+			// cheap hack to avoid printing a timestamp between same-line messages
+			if((len = strlen(format)) && (format[len -1] != '\n'))
+				skipTS = true;
+		} else
+			skipTS = false;
 	}
 
 	// allow the print output to go through
 	va_start(args, format);
 	vprintf(format, args);
 	va_end(args);
+
+	// explicit flush, for stdout redirection cases
+	fflush(stdout);
+}
+
+void debugPrintHexDump(const void *ptr, size_t size)
+{
+	const U8 *data = (const U8 *)ptr;
+	size_t i, k;
+
+	/*
+	 * going for hex dump output to fit within 80 char width terminal:
+	 * AAAA is 16bit address, hb is hex byte, and c is respective character.
+	 *
+	 * AAAA  hb hb hb hb hb hb hb hb hb hb hb hb hb hb hb hb  cccccccccccccccc
+	 */
+	
+	printf("Hex dump of %zu bytes:\n", size);
+	for(i=0; i<size;)
+	{
+		printf("%04zX  ", i);
+
+		for(k=0; k<16; k++)
+		{
+			if((i+k)<size)
+				printf("%02hhx ", data[k]);
+			else
+				printf("   ");
+		}
+
+		printf(" ");
+		
+		for(k=0; k<16; k++)
+		{
+			if(((i+k)<size) && (data[k] >= 0x20))
+				printf("%c", data[k]);
+			else
+				printf(" ");
+		}
+
+		// increment by 16 bytes
+		data += 16;
+		i += 16;
+
+		printf("\n");
+	}
+	
+	printf("\n");
 }
 
 char* strtrim(char *str)
@@ -192,7 +274,7 @@ char* strnextfield(char *str, size_t *clen)
 
 	// update previous field's length to caller
 	if(clen)
-		*clen = (U64)p - (U64)str;
+		*clen = (size_t)p - (size_t)str;
 
 	// find the field after whitespaces
 	num = strspn(p, whitespaces);
@@ -273,6 +355,7 @@ void MasterdCore::RunThread(void)
 	ServerAddress *addr;
 	Packet *data;
 	tPeerRecord *peerrec;
+	char buffer[256];
 	
 	
 	// print welcome message
@@ -292,8 +375,17 @@ void MasterdCore::RunThread(void)
 	initNetworkLib();
 
 	// create and bind to socket
-	debugPrintf(DPRINT_INFO, " - Binding master server to %s:%lu\n", m_Prefs.address, m_Prefs.port);
-	gm_pTransport = new MasterdTransport(m_Prefs.address, (U16)m_Prefs.port);
+	netAddress bindAddress;
+	std::vector<netAddress> bindAddresses;
+	for (int i=0; i<m_Prefs.address.size(); i++)
+	{
+		bindAddress.set(m_Prefs.address[i], false);
+		if (bindAddress.getPort() == 0) bindAddress.setPort(m_Prefs.port);
+		bindAddresses.push_back(bindAddress);
+	}
+
+	gm_pTransport = new MasterdTransport(bindAddresses);
+
 	if(!gm_pTransport->GetStatus())
 	{
 		debugPrintf(DPRINT_ERROR, " - Bind failed, aborting!\n");
@@ -311,6 +403,80 @@ void MasterdCore::RunThread(void)
 	// report we're starting the core loop
 	debugPrintf(DPRINT_INFO, " - Entering core loop.\n");
 
+	if (m_Prefs.testingMode)
+	{
+		const U32 dummyIpv4Count = 255 * 128;
+		const U32 dummyIpv6Count = 255 * 128;
+		const U32 dummyServerCount = dummyIpv4Count + dummyIpv6Count;
+
+		debugPrintf(DPRINT_INFO, " - Adding %i dummy servers.\n", dummyServerCount);
+
+		ServerInfo info;
+		ServerAddress serverAddr;
+
+		const char *gameType = "TEST";
+		const char *missionType = "NORMAL";
+		info.gameType = new char[strlen(gameType)+1];
+		info.missionType = new char[strlen(missionType)+1];
+
+		strcpy(info.gameType, gameType);
+		strcpy(info.missionType, missionType);
+
+		info.testServer = true;
+
+		// Add IPV4
+		serverAddr.type = ServerAddress::IPAddress;
+		serverAddr.port = 28022;
+		serverAddr.address.ipv4.netNum[0] = 192;
+		serverAddr.address.ipv4.netNum[1] = 168;
+		serverAddr.address.ipv4.netNum[2] = 80;
+		serverAddr.address.ipv4.netNum[3] = 0;
+
+		for (int i=0; i<dummyIpv4Count; i++)
+		{
+			gm_pStore->UpdateServer(&serverAddr, &info);
+
+			serverAddr.port += 1;
+			if (serverAddr.port > 28022+255)
+			{
+				serverAddr.port = 28022;
+				serverAddr.address.ipv4.netNum[3]++;
+			}
+
+			if (serverAddr.address.ipv4.netNum[3] == 255)
+			{
+				serverAddr.address.ipv4.netNum[3] = 0;
+				serverAddr.address.ipv4.netNum[2]++;
+			}
+		}
+
+		// Add IPV6
+		serverAddr.type = ServerAddress::IPV6Address;
+		serverAddr.port = 28022;
+		memset(serverAddr.address.ipv6.netNum, '\0', sizeof(serverAddr.address.ipv6.netNum));
+		serverAddr.address.ipv6.netNum[0] = 0x20;
+		serverAddr.address.ipv6.netNum[1] = 0x1;
+		serverAddr.address.ipv6.netNum[2] = 0x0D;
+		serverAddr.address.ipv6.netNum[3] = 0xB8;
+		serverAddr.address.ipv6.netNum[15] = 0x1;
+		for (int i=0; i<dummyIpv6Count; i++)
+		{
+			gm_pStore->UpdateServer(&serverAddr, &info);
+
+			serverAddr.port += 1;
+			if (serverAddr.port > 28022+255)
+			{
+				serverAddr.port = 28022;
+				serverAddr.address.ipv6.netNum[15]++;
+			}
+
+			if (serverAddr.address.ipv6.netNum[15] == 255)
+			{
+				serverAddr.address.ipv6.netNum[15] = 0;
+				serverAddr.address.ipv6.netNum[14]++;
+			}
+		}
+	}
 
 	// socket message handling, loop until thread is stop flagged
 	while(m_RunThread)
@@ -327,6 +493,7 @@ void MasterdCore::RunThread(void)
 			if(!gm_pFloodControl->CheckPeer(*addr, &peerrec, true))
 			{
 				// bad reputation, ignore peer
+				debugPrintf(DPRINT_DEBUG, "Dropped packet from banned host %s\n", addr->toString(buffer));
 				goto SkipPeerMsg;
 			}
 			
@@ -367,9 +534,8 @@ void MasterdCore::ProcMessage(ServerAddress *addr, Packet *data, tPeerRecord *pe
 {
 	tMessageSession	message;
 	tPacketHeader	header;
-	int pack_type = 0;
-	char *str;
 	bool result;
+	char buffer[256];
 
 	
 	// setup message structure, we use this instead of passing along all these
@@ -392,17 +558,21 @@ void MasterdCore::ProcMessage(ServerAddress *addr, Packet *data, tPeerRecord *pe
 BadRepPeer:
 
 		// report bad message header from peer
-		debugPrintf(DPRINT_VERBOSE, "Received bad packet from %s:%hu\n",
-					str = addr->toString(), addr->port);
-		delete[] str;
+		if(shouldDebugPrintf(DPRINT_VERBOSE))
+		{
+			debugPrintf(DPRINT_VERBOSE, "Received bad packet from %s\n", addr->toString(buffer));
+		}
 
 		// increase bad reputation for peer
 		gm_pFloodControl->RepPeer(peerrec, m_Prefs.floodBadMsgTicket);
 		return;
 	}
 
-	debugPrintf(DPRINT_VERBOSE, "[%s:%hu]: ", str = addr->toString(), addr->port);
-	delete[] str;
+	// is global configuration pointer set?
+	if(shouldDebugPrintf(DPRINT_VERBOSE))
+	{
+		debugPrintf(DPRINT_VERBOSE, "[%s]: ", addr->toString(buffer));
+	}
 
 	// handle the specific message type
 	switch(header.type)
@@ -415,6 +585,7 @@ BadRepPeer:
 		}
 
 		case MasterServerListRequest:
+		case MasterServerExtendedListRequest:
 		{
 			debugPrintf(DPRINT_VERBOSE, "Received MasterServerListRequest\n");
 			result = handleListRequest(message);
@@ -442,9 +613,16 @@ BadRepPeer:
 			break;
 		}
 
+		case MasterServerChallenge:
+		{
+			debugPrintf(DPRINT_VERBOSE, "Received MasterServerChallenge\n");
+			result = handleChallengePacket(message);
+			break;
+		}
+
 		default:
 		{
-			debugPrintf(DPRINT_VERBOSE, "Unknown Packet Type %d\n", pack_type);
+			debugPrintf(DPRINT_VERBOSE, "Unknown Packet Type %hhu\n", header.type);
 			result = false;
 		}
 	}
@@ -477,7 +655,7 @@ void MasterdCore::InitPrefs(void)
 		{	CONFIG_TYPE_STR,	&m_Prefs.region,	"region",
 			"Region the Master Server is in. Default: \"Earth\""
 		},
-		{	CONFIG_TYPE_STR,	&m_Prefs.address,	"address",
+		{	CONFIG_TYPE_STR_VECTOR,	&m_Prefs.address,	"address",
 			"IPv4 address that the Daemon listens and sends on. Default: \"0.0.0.0\" for All\n"
 			"NOTE: IPv6 currently not supported."
 		},
@@ -490,12 +668,17 @@ void MasterdCore::InitPrefs(void)
 		},
 		{	CONFIG_TYPE_U32,	&m_Prefs.verbosity,	"verbosity",
 			"Verbosity of log output. Default: 4\n"
-			"   0 - No Messages\n"
+			"   0 - No Messages (except initial startup messages)\n"
 			"   1 - Error Messages\n"
-			"   2 - Warning Messages*\n"
-			"   3 - Informative Messages*\n"
-			"   4 - All [miscellaneous] Messages*!\n\n"
-			"* Indicates it includes all the message types above it.\n"
+			"   2 - Warning Messages\n"
+			"   3 - Informative Messages\n"
+			"   4 - Verbose [miscellaneous] Messages\n"
+			"   5 - Debug Messages (warning: message flood) \n\n"
+			" The chosen message output level will include all those above it.\n"
+		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.timestamp,	"timestamp",
+			"Enable prefixing timestamps to messages. Set to 0 (zero) to not timestamp.\n"
+			"Default: 1 (Enable)"
 		},
 
 		{	CONFIG_SECTION,		NULL,	NULL,
@@ -537,6 +720,24 @@ void MasterdCore::InitPrefs(void)
 			"unknown formatted packets.\n"
 			"Default: 50"
 		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.testingMode,		"testingMode",
+			"Enable testing mode\n"
+		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.challengeMode,		"challengeMode",
+			"Enable challenges for user sessions\n"
+		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.maxServersInResponse,		"maxServersInResponse",
+			"Set max servers in response (will be additionally restricted by packet limit)\n"
+		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.maxPacketsInResponse,		"maxServersInResponse",
+			"Set max packets in response\n"
+		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.maxSessionsPerPeer,		"maxSessionsPerPeer",
+			"Set max sessions per peer\n"
+		},
+		{	CONFIG_TYPE_U32,	&m_Prefs.sessionTimeoutSeconds,		"sessionTimeoutSeconds",
+			"Set seconds required for a session to expire\n"
+		},
 
 		{ CONFIG_TYPE_NOTSET, NULL, NULL } // End of entities
 	};
@@ -545,17 +746,18 @@ void MasterdCore::InitPrefs(void)
 	m_ConfigEntities = entities;
 
 	// clean preferences structure
-	memset(&m_Prefs, 0, sizeof(m_Prefs));
+	m_Prefs.reset();
 	
 	// set preference variables' default values
 	strcpy(m_Prefs.file,	"./masterd.prf");	// set preferences file path and name
 	strcpy(m_Prefs.pidfile,	"./masterd.pid");	// set process id file path and name
 	strcpy(m_Prefs.name,	"PBMS");			// set name
 	strcpy(m_Prefs.region,	"Earth");			// set region
-	strcpy(m_Prefs.address,	"0.0.0.0");			// set bind address to ALL
+	m_Prefs.address.push_back(strdup("0.0.0.0"));
 	m_Prefs.port				= 28002;		// set bind UDP port to standard
 	m_Prefs.heartbeat			= 180;			// set heartbeat to 3 minutes
 	m_Prefs.verbosity			= 4;			// set verbosity to All Messages
+	m_Prefs.timestamp			= 1;			// enable timestamped messages
 	m_Prefs.floodResetTime		= 60;			// reset peer ticket count every 60 seconds
 	m_Prefs.floodForgetTime		= 900;			// forget/delete peer record after 15 minutes
 	m_Prefs.floodBanTime		= 600;			// peer is banned for 10 minutes once reaching max tickets
@@ -608,6 +810,7 @@ void MasterdCore::LoadPrefs(void)
 
 	// success on opening preferences file, now load it
 	debugPrintf(DPRINT_INFO, " - Loading preference file.\n");
+	m_Prefs.address.clear();
 
 	// process the preferences file
 	while(fin.good())
@@ -675,6 +878,26 @@ SkipToNext:
 					
 					break;
 				}
+				case CONFIG_TYPE_STR_VECTOR:
+				{
+					// ensure string to be stored isn't larger than our storage
+					len = strlen(pValue);
+					if(len > 255)
+					{
+						len = 255;
+						debugPrintf(DPRINT_WARN, " - Warning: config variable %s value has been truncated for being too large.\n",
+								pLine);
+					}
+
+					// store string
+					std::vector<char*> *vec = (std::vector<char*>*)pfe->pData;
+					char buf[256];
+					memcpy(buf, pValue, len);
+					buf[len] = 0;
+					vec->push_back(strdup(buf));
+					
+					break;
+				}
 				case CONFIG_TYPE_S32: *((S32 *)pfe->pData) = strtol( pValue, NULL, 10); break;
 				case CONFIG_TYPE_U32: *((U32 *)pfe->pData) = strtoul(pValue, NULL, 10); break;
 
@@ -689,7 +912,7 @@ SkipToNext:
 		// report about unknown variables
 		if(!isFound)
 		{
-			debugPrintf(DPRINT_WARN, " - Warning: config variable %c%s is unknown to me.\n",
+			debugPrintf(DPRINT_WARN, " - Warning: config variable %s is unknown to me.\n",
 					pLine);
 		}
 	}
@@ -701,8 +924,10 @@ SkipToNext:
 		m_Prefs.port = 28002;
 	if(m_Prefs.heartbeat > 3600)	// hearbeat timeout should stay under an hour
 		m_Prefs.heartbeat = 3600;
-	if(m_Prefs.verbosity > DPRINT_LEVELCOUNT -1) // we only have so many verbosity levels
-		m_Prefs.verbosity = DPRINT_LEVELCOUNT -1;
+	if(m_Prefs.verbosity >= DPRINT__COUNT) // we only have so many verbosity levels
+		m_Prefs.verbosity = DPRINT__COUNT -1;
+	if (m_Prefs.maxSessionsPerPeer > SESSION_ABSOLUTE_MAX)
+		m_Prefs.maxSessionsPerPeer = SESSION_ABSOLUTE_MAX;
 
 	// report success
 	debugPrintf(DPRINT_INFO, " - Preference file loaded.\n");
@@ -766,7 +991,7 @@ void MasterdCore::CreatePrefs(void)
 			}
 			
 			// figure out string length before newline
-			len = ((U64)str2 - (U64)str);
+			len = (size_t)str2 - (size_t)str;
 			
 			// write out string just before newline
 			fout << CONFIG_LINE_COMMENT;
@@ -781,7 +1006,18 @@ void MasterdCore::CreatePrefs(void)
 		if(pfe->type == CONFIG_SECTION)
 		{
 			fout << CONFIG_LINE_COMMENTCHAR << strSection;
-		} else
+		}
+		else if (pfe->type == CONFIG_TYPE_STR_VECTOR)
+		{
+			std::vector<char*> &list  = *((std::vector<char*> *)pfe->pData);
+			for (int i=0; i<list.size(); i++)
+			{
+				fout << CONFIG_LINE_VARSTART << pfe->pName << " ";
+				fout << "\"" << list[i] << "\"";
+				fout << endl;
+			}
+		}
+		else
 		{
 			// write variable name
 			fout << CONFIG_LINE_VARSTART << pfe->pName << " ";
@@ -808,7 +1044,6 @@ void MasterdCore::CreatePrefs(void)
 	// report success and close out the opened stream
 	debugPrintf(DPRINT_INFO, " - Wrote new preference file successfully: %s\n", m_Prefs.file);
 	fout.close();
-
 }
 
 
@@ -824,7 +1059,7 @@ void MasterdCore::SetPid(void)
 	// get our process identifier
 	pid = getpid();
 
-	// open output stream to create create the pid file
+	// open output stream to create the pid file
 	fout.open(m_Prefs.pidfile);
 	if(!fout.good()) {
 		debugPrintf(DPRINT_ERROR, " - Failed writing pid file: %s  (Reason: [%d] %s)\n", m_Prefs.pidfile, errno, strerror(errno));

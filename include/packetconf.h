@@ -32,53 +32,26 @@
  * and as for as cable/FIOS is concerned they don't have as severe MTU
  * sizes as DSL w/ PPPoE has. --TRON
  */
-#define UDP_HEADER_SIZE			28
+#define UDP_HEADER_SIZE			48
 #define MAX_MTU_SIZE			1492
 #define MAX_PACKET_SIZE			(MAX_MTU_SIZE - UDP_HEADER_SIZE)
 
 /**
  * @brief Maximum size of a list packet.
  *
- * @todo Tweak if we experience packet fragmentation/truncation.
- *
  */
 #define LIST_PACKET_SIZE		MAX_PACKET_SIZE
 
-/**
- * @brief Size of packet header (protocol-dependent)
- */
-#define LIST_PACKET_HEADER		12
-
-/**
- * @brief Size of a single server element in a packet.
- *
- * 4 bytes/ip, 2 bytes/port
- */
-#define LIST_PACKET_SERVER_SIZE	6
-
-/**
- * @brief Helper calculations for the max server calculations.
- *
- * This calculates the theoretical max.
- */
-#define LIST_PACKET_MAX_SERVERS_	((int)((LIST_PACKET_SIZE - LIST_PACKET_HEADER) / LIST_PACKET_SERVER_SIZE))
-
-/**
- * @brief Actual max servers number for list packets.
- *
- * We cap the number of servers/packet at 254 due to U8 constraints. (see sendListResponse)
- *
- * Since the theoretical max could be higher.
- */
-#define LIST_PACKET_MAX_SERVERS	(LIST_PACKET_MAX_SERVERS_ > 254 ? 254 : LIST_PACKET_MAX_SERVERS_)
-
 // packet's header size in bytes
-#define PACKET_HEADER_SIZE	6
+#define PACKET_HEADER_SIZE  6
+
+/**
+ * @brief Size of packet header (protocol-dependent, worst case)
+ */
+#define LIST_PACKET_HEADER		(PACKET_HEADER_SIZE + 12)
 
 // space remaining after packet header
 #define PACKET_PAYLOAD_SIZE	(MAX_PACKET_SIZE - PACKET_HEADER_SIZE)
-
-
 
 #endif
 

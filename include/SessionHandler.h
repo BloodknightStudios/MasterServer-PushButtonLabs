@@ -25,43 +25,56 @@
 #include <list>
 #include <vector>
 #include "commonTypes.h"
+#include "packetconf.h"
 
-// expire the game client query session after 15 seconds since last activity
-#define SESSION_EXPIRE_TIME		15
+// absolute maximum number of sessions per peer / remote host at the same time
+#define SESSION_ABSOLUTE_MAX				10
 
-// maximum number of sessions per peer / remote host at the same time
-#define SESSION_MAX				10
-
-
-typedef struct tServerAddress
+struct ServerResultPacket
 {
-	U32		address;
-	U16		port;
-} tServerAddress;
+	U16 size;
+	U8 data[LIST_PACKET_SIZE - LIST_PACKET_HEADER];
 
-typedef std::vector<tServerAddress> tcServerAddrVector;
+	inline U16 getNumServers() { return *((U16*)data); }
+};
 
+typedef std::vector<ServerResultPacket> tcServerAddrVector;
 
 class Session
 {
 public:
-	U16						session;		// associated session identifier
-	U16						key;			// associated key
-	S32						lastUsed;		// last time this session was used
 
-	tcServerAddrVector		results;		// associated server query results
+	enum // Query Flags
+	{
+		OnlineQuery       = 0,        // Authenticated with master
+		OfflineQuery      = 1,   // On our own
+		NoStringCompress  = 1<<1,
+		NewStyleResponse = 1<<2,   // Send new style packet response (with ipv6 & such),
+		AuthenticatedSession = 1<<3, // Any dispatched tokens are authenticated
+	};
+
+	U32						authSession;	// Authenticated session key
+
+	time_t					tsLastUsed;		// last time this session was used
+
+	tcServerAddrVector	results;			// associated server query results
+
+	U16						session;			// associated session identifier
 	U16						total;			// total number of servers
-	U8						packTotal;		// total number of packets
-	U16						packNum;		// number of servers per packet
-	U16						packLast;		// number of servers on last packet
+	U16						packTotal;		// total number of packets
 
-	Session(U16 session, U16 key)
+	U8 sessionFlags;							// flags for session transmission data
+
+	Session(U16 session, U8 flags)
 	{
 //		printf("DEBUG: session object born: %X\n", this);
 		
 		this->session	= session;
-		this->key		= key;
-		this->lastUsed	= getAbsTime();
+		this->tsLastUsed	= getAbsTime();
+		this->sessionFlags = flags & ~AuthenticatedSession;
+		this->authSession = 0;
+		this->total = 0;
+		this->packTotal = 0;
 	}
 	~Session()
 	{
@@ -70,6 +83,10 @@ public:
 		// do nothing
 	}
 
+	bool isAuthenticated()
+	{
+		return authSession != 0;
+	}
 };
 
 typedef std::list<Session *> tcSessionList;
@@ -86,16 +103,16 @@ typedef struct tPeerRecord
 {
 	ServerAddress	peer;				// remote peer's address and port info
 	tcSessionList	sessions;			// sessions list of (game client) peer
-	S32				tsCreated;			// when this record was created
-	S32				tsLastSeen;			// last time peer was seen
-	S32				tsLastReset;		// last time peer's tickets were reset
-	S32				tsBannedUntil;		// peer is banned until timestamp
+	time_t			tsCreated;			// when this record was created
+	time_t			tsLastSeen;			// last time peer was seen
+	time_t			tsLastReset;		// last time peer's tickets were reset
+	time_t			tsBannedUntil;		// peer is banned until timestamp
 	S32				tickets;			// count of violations
 	U32				bans;				// count of times peer has been banned
 } tPeerRecord;
 
-typedef std::map<U32, tPeerRecord> tcPeerRecordMap;
-
+typedef std::unordered_map<ServerAddress, tPeerRecord> tcPeerRecordMap;
+class tMessageSession;
 
 class FloodControl
 {
@@ -125,6 +142,9 @@ public:
 	// session management functions
 	void CreateSession(tPeerRecord *peerrec, tPacketHeader *header, Session **session);
 	bool GetSession(tPeerRecord *peerrec, tPacketHeader *header, Session **session);
+
+	void SendAuthenticationChallenge(tMessageSession &msg);
+	bool GetAuthenticatedSession(tPeerRecord *peerrec, tPacketHeader *header, Session **session, bool ignoreNoSession);
 };
 
 //extern SessionHandler	*gm_pSessions;

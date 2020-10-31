@@ -26,8 +26,9 @@
  */
 ServerAddress::ServerAddress()
 {
+	this->socket	= -1;
 	this->port		= 0;
-	this->address	= 0;
+	memset(&address, 0, sizeof(address));
 }
 
 /**
@@ -35,19 +36,11 @@ ServerAddress::ServerAddress()
  *
  * @param	a	ServerAddress to construct from.
  */
-ServerAddress::ServerAddress(ServerAddress *a)
+ServerAddress::ServerAddress( const ServerAddress *a )
 {
+	this->socket	= a->socket;
 	this->port		= a->port;
 	this->address	= a->address;
-}
-
-/**
- * @brief Construct from a host and port.
- *
- * see ServerAddress::set
- */
-ServerAddress::ServerAddress(const char *host, const U16 port) {
-	set(host, port);
 }
 
 /**
@@ -58,8 +51,8 @@ ServerAddress::ServerAddress(const char *host, const U16 port) {
  * or extend as needed to support other networking
  * systems.
  */
-ServerAddress::ServerAddress(const netAddress * a) {
-	getFrom(a);
+ServerAddress::ServerAddress( const netAddress * a, int inSocket ) {
+	getFrom(a, inSocket);
 }
 
 /**
@@ -68,41 +61,52 @@ ServerAddress::ServerAddress(const netAddress * a) {
  * @param	aHost	String specifying host (in a.b.c.d format)
  * @param	aPort	Port number.
  */
-void ServerAddress::set( const char *host, const U16 port )
+void ServerAddress::set( const netAddress *a, int inSocket )
 {
-	U32 num[4];
-	int i;
-	
-	if(strlen(host) < 7)
+	const sockaddr_storage *addr = (sockaddr_storage*)a->getData();
+
+	type = 0;
+	this->socket	= inSocket;
+	this->port		= 0;
+	memset(&address, 0, sizeof(address));
+
+	if (addr->ss_family == AF_INET)
 	{
-		debugPrintf(DPRINT_ERROR, "FIXME: ServerAddress::set() - died on invalid host!\n");
-		exit(1);
-		return; // a.b.c.d is minimum allowed.
+		const sockaddr_in *sockAddr = (const sockaddr_in*)addr;
+		type = ServerAddress::IPAddress;
+		port = ntohs(sockAddr->sin_port);
+
+		uint8_t *addrNum = (uint8_t*)&sockAddr->sin_addr;
+		address.ipv4.netNum[0] = addrNum[0];
+		address.ipv4.netNum[1] = addrNum[1];
+		address.ipv4.netNum[2] = addrNum[2];
+		address.ipv4.netNum[3] = addrNum[3];
 	}
+	else if (addr->ss_family == AF_INET6)
+	{
 
-	char x;
-	sscanf(host, "%u%c%u%c%u%c%u",
-		&num[0], &x, &num[1], &x, &num[2], &x, &num[3]);
-
-	for(i=0; i<4; i++)
-		this->addy[i] = num[i];
-	this->port = port;
+		const sockaddr_in6 *sockAddr = (const sockaddr_in6*)addr;
+		type = ServerAddress::IPV6Address;
+		port = ntohs(sockAddr->sin6_port);
+		address.ipv6.netFlow = sockAddr->sin6_flowinfo ;
+		address.ipv6.netScope = sockAddr->sin6_scope_id;
+		memcpy(&address.ipv6.netNum, &sockAddr->sin6_addr, sizeof(address.ipv6.netNum));
+	}
 }
 
 /**
- * @brief Get a string representing the address.
+ * @brief Get a string representing the IPv4 address.
  *
- * Format is "a.b.c.d:port". You must deallocate
- * the string returned.
+ * Format is "a.b.c.d".
  *
- * @return a new string containing the address.
+ * @param[out] buff String buffer with at least 16 bytes capacity.
+ * @return provided string buffer containing the address.
  */
-char* ServerAddress::toString(  )
+const char* ServerAddress::toString( char outStr[256] ) const
 {
-	char * tmp = new char[24];
-	sprintf(tmp, "%u.%u.%u.%u",
-		addy[0], addy[1], addy[2], addy[3]);
-	return tmp;
+	netAddress addr(this);
+	addr.toString(outStr);
+	return outStr;
 }
 
 /**
@@ -112,12 +116,7 @@ char* ServerAddress::toString(  )
  */
 void ServerAddress::putInto( netAddress * a )
 {
-	char *str;
-
-	str = this->toString();
-	a->set(str, this->port);
-	
-	delete[] str;
+	a->set(this);
 }
 
 /**
@@ -125,10 +124,11 @@ void ServerAddress::putInto( netAddress * a )
  *
  * @param	a	A netAddress to get info from.
  */
-void ServerAddress::getFrom( const netAddress * a )
+void ServerAddress::getFrom( const netAddress * a, int inSocket )
 {
-	set(a->getHost(), a->getPort());
+	set(a, inSocket);
 }
+
 
 /**
  * @brief Check if this ServerAddress equals another.
@@ -138,8 +138,18 @@ void ServerAddress::getFrom( const netAddress * a )
  */
 bool ServerAddress::equals(const ServerAddress * a)
 {
-	if(a->port == this->port && a->address == this->address)
-		return true;
+	if (type != a->type)
+		return false;
+
+	switch (type)
+	{
+		case ServerAddress::IPAddress:
+			return port == a->port && (memcmp(a->address.ipv4.netNum, address.ipv4.netNum, 4) == 0);
+		break;
+		case ServerAddress::IPV6Address:
+			return port == a->port && (memcmp(a->address.ipv6.netNum, address.ipv6.netNum, 16) == 0);
+		break;
+	}
 
 	return false;
 }

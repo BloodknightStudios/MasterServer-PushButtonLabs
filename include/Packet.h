@@ -33,7 +33,7 @@ typedef struct tPacketHeader
 	U8		flags;				// flags
 
 	// session and key below are the U32 sequencer in some packets
-	U16		session;			// session identifier
+	U32		session;			// session identifier
 	U16		key;				// session key
 } tPacketHeader;
 
@@ -94,8 +94,8 @@ class Packet
 		~Packet();
 
 		// primitive I/O methods
-		void writeBytes(const void *data, size_t length);
-		void readBytes(void *data, size_t length);
+		bool writeBytes(const void *data, size_t length);
+		bool readBytes(void *data, size_t length);
 
 		// Our base primitives (U8 is a byte, hopefully :)
 		void writeU8(U8 b);
@@ -121,10 +121,6 @@ class Packet
 
 		// Wrapper functions
 
-		//	- read/write nullterm'ed strings
-//		void readNullString(char* dat); // Reads into dat
-//		void writeNullString(char* dat);
-
 		//	- read/write length indicated strings
 		char *readCString();
 		void writeCString(const char *str, size_t length);
@@ -132,14 +128,15 @@ class Packet
 
 
 		// Helper funcs
-		size_t	getLength();
+		size_t	getLength()		{ return ptr - buff; }
+		size_t  getBufferSize()	{ return size; }
 		char*	getBufferCopy();
-		char*	getBufferPtr();
+		char*	getBufferPtr()	{ return buff; }
 		
-		void	writeHeader(U8 type, U8 flags, U16 session, U16 key);
-		void	writeHeader(tPacketHeader &header);
-		void	readHeader(U8 &type, U8 &flags, U16 &session, U16 &key);
-		void	readHeader(tPacketHeader &header);
+		void	writeHeader(U8 type, U8 flags, U32 session, U16 key);
+		void	writeHeader(tPacketHeader &header)	{ writeHeader(header.type, header.flags, header.session, header.key); }
+		void	readHeader(U8 &type, U8 &flags, U32 &session, U16 &key);
+		void	readHeader(tPacketHeader &header)	{ readHeader(header.type, header.flags, header.session, header.key); }
 
 		bool	getStatus() { return statusOK; };
 

@@ -40,32 +40,40 @@
 #ifndef NET_SOCKET_H
 #define NET_SOCKET_H
 
+class ServerAddress;
 
+#include "commonTypes.h"
 #include "ul.h"
-#include <errno.h>
+#include "netPlatform.h"
 
 /*
  * Socket address, internet style.
  */
 class netAddress
 {
-  /* DANGER!!!  This MUST match 'struct sockaddr_in' exactly! */
-  short          sin_family     ;
-  unsigned short sin_port       ;
-  unsigned int   sin_addr       ;
-  char           sin_zero [ 8 ] ;
+  sockaddr_storage data;
 
 public:
   netAddress () {}
-  netAddress ( const char* host, int port ) ;
+  netAddress ( const sockaddr_storage *inData );
+  netAddress ( const ServerAddress *inData );
 
-  void set ( const char* host, int port ) ;
-  const char* getHost () const ;
+  void set ( const netAddress *inData ) ;
+  void set ( const ServerAddress *inData ) ;
+  void set ( const char *inStr, bool hostLookup ) ;
+  
+  void setPort(int port);
+
+  void getHost(char outStr[256]) const;
   int getPort() const ;
 
-  static const char* getLocalHost () ;
-
   bool getBroadcast () const ;
+  int getFamily() const;
+
+  int getDataSize() const;
+  const void* getData() const;
+
+  const char* toString(char outStr[256]) const;
 };
 
 
@@ -74,22 +82,22 @@ public:
  */
 class netSocket
 {
-  int handle ;
+  UPTR handle ;
 
 public:
 
   netSocket () ;
   virtual ~netSocket () ;
 
-  int getHandle () const { return handle; }
-  void setHandle (int handle) ;
+  UPTR getHandle () const { return handle; }
+  void setHandle (UPTR handle) ;
   
-  bool  open        ( bool stream=true ) ;
+  bool  open        ( bool ipv6, bool stream ) ;
   void  close		    ( void ) ;
-  int   bind        ( const char* host, int port ) ;
+  int   bind        ( const netAddress *addr ) ;
   int   listen	    ( int backlog ) ;
-  int   accept      ( netAddress* addr ) ;
-  int   connect     ( const char* host, int port ) ;
+  int   accept      ( const netAddress* addr ) ;
+  int   connect     ( const netAddress *addr ) ;
   int   send	    ( const void * buffer, int size, int flags = 0 ) ;
   int   sendto      ( const void * buffer, int size, int flags, const netAddress* to ) ;
   int   recv	    ( void * buffer, int size, int flags = 0 ) ;

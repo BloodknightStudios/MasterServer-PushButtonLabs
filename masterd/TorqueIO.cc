@@ -40,15 +40,71 @@ bool isPrintableString(const char *str)
 }
 
 /**
+ * @brief Handles session auth for packets which require sessions
+ */
+bool handlePacketAuthentication(tMessageSession &msg, Session **outPs, bool ignoreNoSession)
+{
+	Session			*ps = NULL;
+
+	if (gm_pConfig->challengeMode)
+	{
+		gm_pFloodControl->GetAuthenticatedSession(msg.peerrec, msg.header, &ps, ignoreNoSession);
+		if (!ps)
+		{
+			debugPrintf(DPRINT_ERROR, " - Failed to create authenticated session!\n");
+			return false;
+		}
+		else if (!ps->isAuthenticated())
+		{
+			msg.session = ps;
+			debugPrintf(DPRINT_VERBOSE, " - Sending client authentication challenge\n");
+			gm_pFloodControl->SendAuthenticationChallenge(msg);
+			return false;
+		}
+
+		msg.session = ps;
+	}
+	else if (!ignoreNoSession)
+	{
+		// original method, create session if it doesn't exist
+		gm_pFloodControl->CreateSession(msg.peerrec, msg.header, &ps);
+		msg.session = ps;
+	}
+	else
+	{
+		// original method, sans challenge
+		gm_pFloodControl->GetSession(msg.peerrec, msg.header, &ps);
+		msg.session = ps;
+	}
+
+	*outPs = ps;
+	return true;
+}
+
+bool handleChallengePacket(tMessageSession &msg)
+{
+	Session *ps = NULL;
+	if (gm_pConfig->challengeMode)
+	{
+		handlePacketAuthentication(msg, &ps, false);
+	}
+	
+	return true;
+}
+
+/**
  * @brief Parse a list request packet and reply.
  */
 bool handleListRequest(tMessageSession &msg)
 {
 	ServerFilter	filter;
 	Session			*ps;
-	U8				index;
+	U16				index;
+	U8				responseType;
 	int				i;
-	char			*str;
+	char			buffer[256];
+	bool isExtendedRequest = msg.header->type == MasterServerExtendedListRequest;
+	bool resendPacket = (isExtendedRequest) ? (index == 65535) : (index == 255);
 
 	
 	/*
@@ -75,24 +131,46 @@ bool handleListRequest(tMessageSession &msg)
 	/***********************************
 	 List Query packet
 	***********************************/
-	index = msg.pack->readU8();
+	index = isExtendedRequest ? msg.pack->readU16() : msg.pack->readU8();
 
-	if(gm_pConfig->verbosity > 3)
+	if(checkLogLevel(DPRINT_VERBOSE))
 	{
-		if(index == 0xFF)
-			printf("Received list query request from %s:%hu\n", str = msg.addr->toString(), msg.addr->port);
+		msg.addr->toString(buffer);
+		if(!resendPacket)
+			printf("Received list query request from %s\n", buffer);
 		else
-			printf("Received list resend request from %s:%hu\n", str = msg.addr->toString(), msg.addr->port);
+			printf("Received list resend request from %s\n", buffer);
 		printf(" [F: %X, S: %X, K: %u, I: %X]\n", msg.header->flags, msg.header->session, msg.header->key, index);
-		delete[] str;
 	}
+
+	// Need to ensure the newstyle flag is set if we are using the extended request
+	if (isExtendedRequest)
+	{
+		msg.header->flags |= Session::NewStyleResponse;
+	}
+
+//	printf(" dumping request packet..\n");
+//	debugPrintHexDump(msg.pack->getBufferPtr(), msg.pack->getBufferSize());
 
 	// don't waste our time parsing the rest of this resend request packet,
 	// go ahead and resend the specific packet now
-	if(index != 0xFF)
+
+	if(resendPacket)
 	{
 		// get associated session
-		gm_pFloodControl->GetSession(msg.peerrec, msg.header, &ps);
+
+		if (!handlePacketAuthentication(msg, &ps, true))
+		{
+			printf(" Authentication failed for some reason\n");
+
+			if(checkLogLevel(DPRINT_DEBUG))
+			{
+				printf(" No such session exists, ignoring resend request.\n");
+			}
+			
+			return true;
+		}
+
 		if(ps)
 		{
 			// resend the requested list packet
@@ -112,7 +190,23 @@ bool handleListRequest(tMessageSession &msg)
 
 	// go ahead and make sure the strings aren't garbage
 	if(!isPrintableString(filter.gameType) || !isPrintableString(filter.missionType))
-		return false; // strings are and packet is malformed
+	{
+		if(checkLogLevel(DPRINT_DEBUG))
+		{
+			debugPrintf(DPRINT_DEBUG, " Invalid query strings issued, ignoring query request.\n");
+			if(isPrintableString(filter.gameType))
+			{
+				debugPrintf(DPRINT_DEBUG, " gameType is invalid..\n");
+				debugPrintHexDump(filter.gameType, strlen(filter.gameType));
+			}
+			if(isPrintableString(filter.missionType))
+			{
+				debugPrintf(DPRINT_DEBUG, " missionType is invalid..\n");
+				debugPrintHexDump(filter.gameType, strlen(filter.missionType));
+			}
+		}
+		return false; // strings are garbage and packet is malformed
+	}
 
 	/***********************************
 	 Read miscellaneous properties
@@ -134,9 +228,7 @@ bool handleListRequest(tMessageSession &msg)
 	if(filter.buddyCount)
 	{
 		filter.buddyList = new U32[filter.buddyCount];
-
-		for(i=0; i<filter.buddyCount; i++)
-			filter.buddyList[i] = msg.pack->readU32();
+		msg.pack->readBytes(filter.buddyList, filter.buddyCount * sizeof(U32));
 	}
 
 	// check packet parser status
@@ -147,20 +239,41 @@ bool handleListRequest(tMessageSession &msg)
 	if(filter.maxPlayers  < filter.minPlayers)
 		filter.maxPlayers = filter.minPlayers;
 
-
-	// create new session
-	gm_pFloodControl->CreateSession(msg.peerrec, msg.header, &ps);
-	if(!ps)
+	// make sure we have a valid authenticated session
+	if (!handlePacketAuthentication(msg, &ps, false))
 	{
-		debugPrintf(DPRINT_ERROR, " - Failed to create session!\n");
+		debugPrintf(DPRINT_ERROR, " - Packet authentication failed!\n");
 		return true;
 	}
 
 	// search for servers matching query filter
 	msg.session = ps;
+
+	// We need to force the default region filter mask based on the request
+	responseType = ps->sessionFlags & Session::NewStyleResponse ? 1 : 0;
+	if (responseType == 0)
+	{
+		if ((filter.regions & ServerFilter::RegionAddressMask) == 0)
+		{
+			filter.regions |= ServerFilter::RegionIsIPV4Address;
+		}
+
+		// this should be unset
+		filter.regions &= ~ServerFilter::RegionIsIPV6Address;
+	}
+	else if (responseType == 1)
+	{
+		if ((filter.regions & ServerFilter::RegionAddressMask) == 0)
+		{
+			filter.regions |= ServerFilter::RegionIsIPV4Address;
+			filter.regions |= ServerFilter::RegionIsIPV6Address;
+		}
+	}
+
+	// NOW we can search
 	gm_pStore->QueryServers(ps, &filter);
 	
-	debugPrintf(DPRINT_VERBOSE, "Got %d results from a queryServers.\n", ps->total);
+	debugPrintf(DPRINT_VERBOSE, "Got %hu results from queryServers.\n", ps->total);
 
 	// send the results
 	for(i=0; i<ps->packTotal; i++)
@@ -201,6 +314,7 @@ bool handleInfoRequest(tMessageSession &msg)
 bool handleInfoResponse(tMessageSession &msg)
 {
 	ServerInfo info;
+	Session* ps = NULL;
 
 	/*
 
@@ -220,6 +334,19 @@ bool handleInfoResponse(tMessageSession &msg)
 	U32		playersGuiList[numPlayers];
 
 	*/
+
+	if (gm_pConfig->challengeMode)
+	{
+		if (!handlePacketAuthentication(msg, &ps, false))
+		{
+			if(checkLogLevel(DPRINT_DEBUG))
+			{
+				printf(" No such session exists, ignoring info update.\n");
+			}
+			
+			return true;
+		}
+	}
 	
 	info.addr			= *msg.addr;
 	info.session		= msg.header->session;
@@ -228,7 +355,7 @@ bool handleInfoResponse(tMessageSession &msg)
 	info.gameType		= msg.pack->readCString();
 	info.missionType	= msg.pack->readCString();
 	info.maxPlayers		= msg.pack->readU8();
-	info.regions		= msg.pack->readU32();
+	info.regions		= msg.pack->readU32() & ~ServerFilter::RegionAddressMask;
 	info.version		= msg.pack->readU32();
 	info.infoFlags		= msg.pack->readU8();
 	info.numBots		= msg.pack->readU8();
@@ -238,19 +365,33 @@ bool handleInfoResponse(tMessageSession &msg)
 
 	// go ahead and make sure the strings aren't garbage
 	if(!isPrintableString(info.gameType) || !isPrintableString(info.missionType))
-		return false; // strings are and packet is malformed
+	{
+		if(checkLogLevel(DPRINT_DEBUG))
+		{
+			debugPrintf(DPRINT_DEBUG, " Invalid response strings issued, ignoring info response.\n");
+			if(isPrintableString(info.gameType))
+			{
+				debugPrintf(DPRINT_DEBUG, " gameType is invalid..\n");
+				debugPrintHexDump(info.gameType, strlen(info.gameType));
+			}
+			if(isPrintableString(info.missionType))
+			{
+				debugPrintf(DPRINT_DEBUG, " missionType is invalid..\n");
+				debugPrintHexDump(info.gameType, strlen(info.missionType));
+			}
+		}
+		return false; // strings are garbage and packet is malformed
+	}
 
 	// check packet parser status
 	if(!msg.pack->getStatus())
 		return false; // packet was malformed
-	
-	if(info.playerCount)
+
+	// Torque doesn't normally send player GUIDs, while Tribes 2 did, so account for it
+	if(info.playerCount && ((msg.pack->getLength() / sizeof(U32)) >= info.playerCount))
 	{
 		info.playerList = new U32[info.playerCount];
-
-		// Read in players
-		for(int i=0; i< info.playerCount; i++)
-			info.playerList[i] = msg.pack->readU32();
+		msg.pack->readBytes(info.playerList, info.playerCount * sizeof(U32));
 	}
 
 //	// check packet parser status
@@ -269,7 +410,8 @@ bool handleInfoResponse(tMessageSession &msg)
  */
 bool handleHeartbeat(tMessageSession &msg)
 {
-	U16 session, key;
+	U32 session;
+	U16 key;
 	
 	///	No Format of request after header.
 	
@@ -436,33 +578,54 @@ void sendInfoResponse(tMessageSession &msg)
  *	<li> We can send 248 servers/packet, then.
  * </ul>
  *
- * 	We never want to send more than 254 packets
- *  Because 255 == FF == the initial request indicator
- *
- *	So we can never give more than 62992 servers as a result. Note that this is quite
- *	a lot of servers; if we plan on more, then we can just make the packet index a
- *	U16 and issue an upgrade.
+ * 	For old style responses, We never want to send more than 254 packets
+ *  Because 255 == FF == the initial request indicator.
+ * 	Similarly for new style responses, We never want to send more than 65534 packets
+ *  Because 65535 == FFFF == the initial request indicator.
  *
  *	We customize all this behaviour with defines.
  */
-void sendListResponse(tMessageSession &msg, U8 index)
+void sendListResponse(tMessageSession &msg, U16 index)
 {
 	Packet			*reply = new Packet(LIST_PACKET_SIZE);
-	tServerAddress	addr;
-	U16				count;	// number of servers to place into packet
-	U16				start;	// start position in servers list result
-	U16				i;
 
 	/*
 	
 	Format of response after header:
 
-	U8			packetIndex;
-	U8			packetTotal;
+	if (NewStyleResponse)
+	{
+		U16		packetIndex;
+		U16		packetTotal;
+	}
+	else
+	{
+		U8			packetIndex;
+		U8			packetTotal;
+	}
+
 	U16			serverCount;
-	struct {
-		U32		address;
-		U16		port;
+	struct MasterServerListResponse { // old style
+		struct {
+			U32		address;
+			U16		port;
+		}			servers[serverCount];
+	}
+	struct MasterServerExtendedListResponse { // new style
+		U8 addressType;
+		union
+		{
+			struct ipv4 // if addressType == 0
+			{
+				U32		address;
+				U16		port;
+			}
+			struct ipv6 // if addressType == 1
+			{
+				U8		address[16];
+				U16		port;
+			}
+		}
 	}			servers[serverCount];
 	
 
@@ -471,32 +634,26 @@ void sendListResponse(tMessageSession &msg, U8 index)
 	// first thing is to make sure requested index is within server results range
 	if(index >= msg.session->packTotal)
 		return; // abort, invalid packet index
-	
-	// figure out how many servers are going into this packet
-	if(index == msg.session->packTotal -1)
-		count = msg.session->packLast;	// number of servers on last packet
-	else
-		count = msg.session->packNum;	// number of servers per packet
 
-	// figure out our start position for this packet to iterate through the list
-	start = msg.session->packNum * index;
-	
+	ServerResultPacket &resultPacket = msg.session->results[index];
 
 	// write packet header and the list details
-	reply->writeHeader(MasterServerListResponse, 0, msg.header->session, msg.header->key);
-	reply->writeU8(index);						// packet index
-	reply->writeU8(msg.session->packTotal);		// total packets
-	reply->writeU16(count);						// server count in this packet
-
-	// now populate the server list
-	for(i=0; i<count; i++)
+	U8 responseType = msg.session->sessionFlags & Session::NewStyleResponse ? 1 : 0;
+	if (responseType == 0)
 	{
-		// get server address record
-		addr = msg.session->results[start + i];
-
-		// write server address and port
-		reply->writeU32(addr.address);
-		reply->writeU16(addr.port);
+		//printf(" Sending normal response (%i packets, %i total results).\n", msg.session->packTotal, msg.session->total);
+		reply->writeHeader(MasterServerListResponse, msg.session->sessionFlags, msg.header->session, msg.header->key);
+		reply->writeU8(index);						// packet index
+		reply->writeU8(msg.session->packTotal);		// total packets
+		reply->writeBytes(resultPacket.data, resultPacket.size);
+	}
+	else if (responseType == 1)
+	{
+		//printf(" Sending new response (%i packets, %i total results, %i size).\n", msg.session->packTotal, msg.session->total, resultPacket.size);
+		reply->writeHeader(MasterServerExtendedListResponse, msg.session->sessionFlags, msg.header->session, msg.header->key);
+		reply->writeU16(index);						// packet index
+		reply->writeU16(msg.session->packTotal);		// total packets
+		reply->writeBytes(resultPacket.data, resultPacket.size);
 	}
 
 	// All done, send.

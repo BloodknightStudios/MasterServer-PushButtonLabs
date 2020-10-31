@@ -23,6 +23,8 @@
 
 #include "commonTypes.h"
 
+class ServerStore;
+
 // Some configuration
 #define HAVE_SQLITE
 
@@ -91,25 +93,27 @@ extern MasterdTransport *gm_pTransport;
 
 enum
 {
-	DPRINT_DEBUG = 0,
-	DPRINT_ERROR,			// Level 0
-	DPRINT_WARN,			// Level 1
-	DPRINT_INFO,			// Level 2
-	DPRINT_VERBOSE,			// Level 3
+	DPRINT_NONE = 0,
+	DPRINT_ERROR,			// Level 1
+	DPRINT_WARN,			// Level 2
+	DPRINT_INFO,			// Level 3
+	DPRINT_VERBOSE,			// Level 4
+	DPRINT_DEBUG,			// Level 5
 
-	DPRINT_LEVELCOUNT
+	DPRINT__COUNT			// number of valid print levels, not a valid option
 };
 
-typedef struct tDaemonConfig
+struct tDaemonConfig
 {
 	char	file[256];			// path and name of preferences file
 	char	pidfile[256];		// path and name of process id file
 	char	name[256];			// name of master server instance
 	char	region[256];		// region of where master server resides
-	char	address[256];		// local IP listening address to bind to
+	std::vector<char*> address; // local IDP addresses to bind to
 	U32		port;				// local UDP listening port number to bind to
 	U32		heartbeat;			// amount of time without heartbeat response before server is delisted
 	U32		verbosity;			// verbosity logging level
+	U32		timestamp;			// prefix timestamp to messages when not zero
 
 	// flood control settings
 	U32		floodResetTime;		// reset ticket count every X seconds
@@ -117,7 +121,54 @@ typedef struct tDaemonConfig
 	U32		floodBanTime;		// peer is banned for X seconds once reaching max tickets
 	U32		floodMaxTickets;	// ban peer once reaching X tickets
 	U32		floodBadMsgTicket;	// number of X tickets for receiving bad messages from peer
-} tDaemonConfig;
+
+	U32		testingMode;
+	U32		challengeMode;	// Enable session challenges
+
+	U32		maxServersInResponse;
+	U32		maxPacketsInResponse;
+
+	U32		maxSessionsPerPeer;
+	U32		sessionTimeoutSeconds;
+
+	void reset()
+	{
+		file[0] = '\0';
+		pidfile[0] = '\0';
+		name[0] = '\0';
+		region[0] = '\0';
+
+		for (int i=address.size()-1; i >= 0; i--)
+		{
+			delete address[i];
+		}
+		address.clear();
+
+		port = 0;
+		heartbeat = 0;
+		verbosity = 0;
+		timestamp = 0;
+		floodResetTime = 0;
+		floodForgetTime = 0;
+		floodBanTime = 0;
+		floodMaxTickets = 0;
+		floodBadMsgTicket = 0;
+
+		testingMode = 0;
+		challengeMode = 0;
+
+		maxServersInResponse = 65534;
+		maxPacketsInResponse = 254;
+
+		maxSessionsPerPeer = 10;
+		sessionTimeoutSeconds = 15;
+	}
+
+	~tDaemonConfig()
+	{
+		reset();
+	}
+};
 
 //=============================================================================
 // Revised Masterd Core --TRON
@@ -129,16 +180,18 @@ enum eConfigEntityType
 	CONFIG_TYPE_S32,			// Signed 32bit integer
 	CONFIG_TYPE_U32,			// Unsigned 32bit integer
 
+	CONFIG_TYPE_STR_VECTOR,			// String -- vector of char array
+
 	CONFIG_SECTION = 100		// config document section
 };
 
-typedef struct tConfigEntity
+struct tConfigEntity
 {
 	enum eConfigEntityType		type;	// entity storage type
 	void						*pData;	// pointer to storage
 	const char					*pName;	// entity name
 	const char					*pDesc;	// pointer to description
-} tConfigEntity;
+};
 
 class MasterdCore
 {
@@ -173,7 +226,17 @@ public:
 // global source member, daemon configuration structure
 extern tDaemonConfig	*gm_pConfig;
 
-extern void debugPrintf(const int level, const char *format, ...);
+extern bool shouldDebugPrintf(const int level);
+extern void debugPrintf(int level, const char *format, ...);
+static inline bool checkLogLevel(int level)
+{
+	if(gm_pConfig && (level > (int)gm_pConfig->verbosity))
+		return false; // message level too high
+
+	// message level is OK to log
+	return true;
+}
+extern void debugPrintHexDump(const void *ptr, size_t size);
 
 
 #endif // _MASTERD_H_

@@ -54,16 +54,7 @@ void killNetworkLib()	// Shut us down.
  *
  * @return current time in seconds.
  */
-int getAbsTime()
+time_t getAbsTime()
 {
-	return (int)time(NULL);
-}
-
-/**
- * @brief Sleep for the specified number of milliseconds.
- *
- */
-void millisleep(int delay)
-{
-	ulMilliSecondSleep(delay);
+	return time(NULL);
 }

@@ -24,8 +24,6 @@
 
 /**
  * @brief We store the SessionHandler global here.
- *
- * @todo Should we make SessionHandler a singleton? Doesn't really seem worth it.
  */
 FloodControl	*gm_pFloodControl;
 
@@ -92,7 +90,7 @@ void FloodControl::GetPeerRecord(tPeerRecord **peerrec, ServerAddress &peer, boo
 {
 	tcPeerRecordMap::iterator	it;
 	tPeerRecord					*pr;
-	char						*str;
+	char buffer[256];
 
 
 	// abort on NULL
@@ -103,7 +101,7 @@ void FloodControl::GetPeerRecord(tPeerRecord **peerrec, ServerAddress &peer, boo
 	*peerrec = NULL;
 
 	// locate the peer record
-	it = m_Records.find(peer.address);
+	it = m_Records.find(peer);
 
 	// handle situtation when record doesn't exist
 	if(it == m_Records.end())
@@ -111,7 +109,7 @@ void FloodControl::GetPeerRecord(tPeerRecord **peerrec, ServerAddress &peer, boo
 		// create record if allowed to create non-existant records
 		if(createNoExist)
 		{
-			*peerrec = &m_Records[peer.address];
+			*peerrec = &m_Records[peer];
 			pr		 = new tPeerRecord();
 
 			// set peer address, creation and last seen time
@@ -126,9 +124,10 @@ void FloodControl::GetPeerRecord(tPeerRecord **peerrec, ServerAddress &peer, boo
 			**peerrec = *pr;
 
 			// report record creation
-			debugPrintf(DPRINT_VERBOSE, "FloodControl: Record created for %s\n",
-						str = (*peerrec)->peer.toString());
-			delete[] str;
+			if(shouldDebugPrintf(DPRINT_VERBOSE))
+			{
+				debugPrintf(DPRINT_VERBOSE, "FloodControl: Record created for %s\n", (*peerrec)->peer.toString(buffer));
+			}
 		}
 	} else
 	{
@@ -142,7 +141,8 @@ void FloodControl::CheckSessions(tPeerRecord *peerrec, bool forceExpire)
 {
 	tcSessionList::iterator	it, next;
 	Session					*ps;
-	S32						ts;
+	time_t					ts;
+	U32						sessionExpireTime = gm_pConfig->sessionTimeoutSeconds;
 
 	// get current timestamp
 	ts = getAbsTime();
@@ -156,11 +156,11 @@ void FloodControl::CheckSessions(tPeerRecord *peerrec, bool forceExpire)
 		if(forceExpire)
 		{
 			// we are to destry all existing sessions, force it to be expired
-			ps->lastUsed = 0;
+			ps->tsLastUsed = 0;
 		}
 
 		// move on to next session if current one hasn't expired yet
-		if(ps->lastUsed + SESSION_EXPIRE_TIME > ts)
+		if(ps->tsLastUsed + sessionExpireTime > ts)
 		{
 			it++;
 			continue;
@@ -186,8 +186,7 @@ void FloodControl::DoProcessing(U32 count)
 {
 	tcPeerRecordMap::iterator next;
 	tPeerRecord *peerrec;
-	char *str;
-//	U32 i;
+	char buffer[256];
 
 
 //CheckMoreRecords:
@@ -213,9 +212,11 @@ void FloodControl::DoProcessing(U32 count)
 		// peer is to be forgotten, last seen time has expired
 
 		// report peer record expired
-		debugPrintf(DPRINT_VERBOSE, "FloodControl: Record expired for %s\n",
-					str = peerrec->peer.toString());
-		delete[] str;
+		if(shouldDebugPrintf(DPRINT_VERBOSE))
+		{
+			debugPrintf(DPRINT_VERBOSE, "FloodControl: Record expired for %s\n",
+						peerrec->peer.toString(buffer));
+		}
 
 		next = m_ProcIT;
 		next++;
@@ -262,8 +263,8 @@ bool FloodControl::CheckPeer(ServerAddress &peer, tPeerRecord **peerrec, bool ef
 
 bool FloodControl::CheckPeer(tPeerRecord *peerrec, bool effectRep)
 {
-	S32 ts;
-	char *str;
+	time_t ts;
+	char buffer[256];
 
 	
 	// abort on NULL
@@ -295,10 +296,11 @@ bool FloodControl::CheckPeer(tPeerRecord *peerrec, bool effectRep)
 		peerrec->tsLastSeen		= ts;
 
 		// report unban
-		str = peerrec->peer.toString();
-		debugPrintf(DPRINT_INFO, "FloodControl: Unbanned %s:%u [banned %lu times]\n",
-					str, peerrec->peer.port, peerrec->bans);
-		delete[] str;
+		if(shouldDebugPrintf(DPRINT_VERBOSE))
+		{
+			debugPrintf(DPRINT_VERBOSE, "FloodControl: Unbanned %s [banned %u times]\n",
+						peerrec->peer.toString(buffer), peerrec->bans);
+		}
 	}
 
 	// now check to see if peer is still banned based on their record
@@ -331,7 +333,7 @@ void FloodControl::RepPeer(ServerAddress &peer, S32 tickets)
 
 void FloodControl::RepPeer(tPeerRecord *peerrec, S32 tickets)
 {
-	char *str;
+	char buffer[256];
 
 	
 	// abort on NULL
@@ -355,11 +357,11 @@ void FloodControl::RepPeer(tPeerRecord *peerrec, S32 tickets)
 	CheckSessions(peerrec, true);
 
 	// report ban
-	str = peerrec->peer.toString();
-	debugPrintf(DPRINT_INFO, "FloodControl: Banned %s:%u [banned %lu times]\n",
-				str, peerrec->peer.port, peerrec->bans);
-	delete[] str;
-	
+	if(shouldDebugPrintf(DPRINT_INFO))
+	{
+		debugPrintf(DPRINT_INFO, "FloodControl: Banned %s [banned %u times]\n",
+					peerrec->peer.toString(buffer), peerrec->bans);
+	}
 }
 
 
@@ -369,14 +371,15 @@ void FloodControl::RepPeer(tPeerRecord *peerrec, S32 tickets)
 void FloodControl::CreateSession(tPeerRecord *peerrec, tPacketHeader *header, Session **session)
 {	
 	// don't allow more than SESSION_MAX sessions at the same time
-	if(peerrec->sessions.size() >= SESSION_MAX)
+	if(peerrec->sessions.size() >= gm_pConfig->maxSessionsPerPeer)
 	{
+		debugPrintf(DPRINT_DEBUG, "SESSION MAX EXCEEDED!!!!!!!!!!\n");
 		*session = NULL;
 		return; // peer has reached session limit
 	}
 
 	// create new session
-	*session = new Session(header->session, header->key);
+	*session = new Session(header->session, header->flags);
 
 	// keep track of session
 	peerrec->sessions.push_back(*session);
@@ -400,10 +403,10 @@ bool FloodControl::GetSession(tPeerRecord *peerrec, tPacketHeader *header, Sessi
 		ps = *it;
 
 		// is this the session we're looking for?
-		if(ps->session == header->session && ps->key == header->key)
+		if(ps->session == header->session)
 		{
 			// found it
-			ps->lastUsed	= getAbsTime();	
+			ps->tsLastUsed	= getAbsTime();
 			*session		= ps;
 			break;
 		}
@@ -411,5 +414,113 @@ bool FloodControl::GetSession(tPeerRecord *peerrec, tPacketHeader *header, Sessi
 
 	// done
 	return (*session == NULL);
+}
+
+bool FloodControl::GetAuthenticatedSession(tPeerRecord *peerrec, tPacketHeader *header, Session **session, bool ignoreNoSession)
+{
+	tcSessionList::iterator it;
+	Session					*ps;
+
+
+	// default to session not found
+	*session = NULL;
+	
+	// find the requested session
+	for(it = peerrec->sessions.begin(); it != peerrec->sessions.end(); it++)
+	{
+		// get pointer to session
+		ps = *it;
+
+		// is this the session we're looking for?
+		if(ps->authSession != 0 && ps->authSession == header->session)
+		{
+			// found it
+			ps->tsLastUsed	= getAbsTime();	
+			*session		= ps;
+			if(shouldDebugPrintf(DPRINT_VERBOSE))
+			{
+				debugPrintf(DPRINT_VERBOSE, " - Found session %u with auth key %u\n", ps->session, header->session);
+			}
+			break;
+		}
+	}
+
+	if (!ignoreNoSession && *session == NULL)
+	{
+		if (shouldDebugPrintf(DPRINT_VERBOSE))
+		{
+			debugPrintf(DPRINT_VERBOSE, "FloodControl: Creating authenticated session from session key %u\n", header->session);
+		}
+		gm_pFloodControl->CreateSession(peerrec, header, session);
+	}
+
+	// done
+	return (*session == NULL);
+}
+
+void FloodControl::SendAuthenticationChallenge(tMessageSession &msg)
+{
+	Packet *reply  = new Packet(PACKET_HEADER_SIZE + 4);
+	Session *sessionInstance = msg.session;
+	tPeerRecord *peerrec = msg.peerrec;
+
+	sessionInstance->sessionFlags |= Session::AuthenticatedSession | Session::NewStyleResponse;
+
+	U32 sessionKeys[SESSION_ABSOLUTE_MAX];
+	U32 numSessions = 0;
+	for (tcSessionList::iterator itr = peerrec->sessions.begin(), end = peerrec->sessions.end(); itr != end; itr++)
+	{
+		sessionKeys[numSessions++] = (*itr)->authSession;
+		if (numSessions >= SESSION_ABSOLUTE_MAX)
+			break;
+	}
+
+	U32 authSession;
+	bool used = true;
+	while (used)
+	{
+		used = false;
+		authSession = rand();
+		if (authSession == 0)
+			continue;
+
+		for (U32 i=0; i<numSessions; i++)
+		{
+			if (sessionKeys[i] == authSession)
+			{
+				used = true;
+				break;
+			}
+		}
+
+		if (numSessions == 0)
+		{
+			break;
+		}
+	}
+
+	sessionInstance->authSession = authSession;
+	if (shouldDebugPrintf(DPRINT_VERBOSE))
+	{
+		debugPrintf(DPRINT_VERBOSE, "FloodControl: generated auth key %u, sessionFlags %u\n", authSession, sessionInstance->sessionFlags);
+	}
+
+	// Prep and send packet
+	reply->writeHeader(MasterServerChallenge, sessionInstance->sessionFlags, sessionInstance->authSession, msg.header->key);
+	
+	if (msg.header->flags & Session::AuthenticatedSession)
+	{
+		// Send back the whole bad key we sent rather than the first 16 bits
+		reply->writeU32(msg.header->session);
+	}
+	else
+	{
+		// For unauthenticated requests, just send back the 16-bit session & key
+		reply->writeU16(sessionInstance->session);
+		reply->writeU16(msg.header->key);
+	}
+
+	gm_pTransport->sendPacket(reply, &peerrec->peer);
+	delete reply;
 }
 
